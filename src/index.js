@@ -8,6 +8,7 @@ const useCamera = () => {
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
   const [recordedChunks, setRecordedChunks] = useState([]);
   const [capturedImages, setCapturedImages] = useState([]);
+  const [recordedVideoUrl, setRecordedVideoUrl] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -159,6 +160,12 @@ const useCamera = () => {
 
       mediaRecorder.onstop = () => {
         setRecordedChunks(chunks);
+        // Create video URL for preview
+        if (chunks.length > 0) {
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          const url = URL.createObjectURL(blob);
+          setRecordedVideoUrl(url);
+        }
       };
 
       mediaRecorder.start(100); // Collect data every 100ms
@@ -231,6 +238,15 @@ const useCamera = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [recordedChunks]);
+
+  // Clear recorded video
+  const clearRecordedVideo = useCallback(() => {
+    if (recordedVideoUrl) {
+      URL.revokeObjectURL(recordedVideoUrl);
+      setRecordedVideoUrl(null);
+    }
+    setRecordedChunks([]);
+  }, [recordedVideoUrl]);
 
   // Download captured image
   const downloadImage = useCallback((imageData) => {
@@ -334,8 +350,12 @@ const useCamera = () => {
       capturedImages.forEach(image => {
         URL.revokeObjectURL(image.url);
       });
+      // Cleanup recorded video URL
+      if (recordedVideoUrl) {
+        URL.revokeObjectURL(recordedVideoUrl);
+      }
     };
-  }, [stopCamera, capturedImages]);
+  }, [stopCamera, capturedImages, recordedVideoUrl]);
 
   return {
     // Refs
@@ -349,6 +369,7 @@ const useCamera = () => {
     selectedDeviceId,
     recordedChunks,
     capturedImages,
+    recordedVideoUrl,
     
     // Actions
     startCamera,
@@ -361,6 +382,7 @@ const useCamera = () => {
     switchCamera,
     toggleCamera,
     getDevices,
+    clearRecordedVideo,
     
     // Computed
     hasRecording: recordedChunks.length > 0,
