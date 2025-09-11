@@ -69,7 +69,7 @@ const useCamera = () => {
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play();
+        await videoRef.current.play();
       }
       
       setIsStreaming(true);
@@ -98,7 +98,7 @@ const useCamera = () => {
             streamRef.current = basicStream;
             if (videoRef.current) {
               videoRef.current.srcObject = basicStream;
-              videoRef.current.play();
+              await videoRef.current.play();
             }
             setIsStreaming(true);
             return;
