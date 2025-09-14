@@ -186,42 +186,59 @@ const useCamera = () => {
 
   // Capture image from video stream
   const captureImage = useCallback(() => {
-    if (!videoRef.current || !isStreaming) return null;
-
-    try {
-      // Create canvas if it doesn't exist
-      if (!canvasRef.current) {
-        canvasRef.current = document.createElement('canvas');
+    return new Promise((resolve, reject) => {
+      if (!videoRef.current || !isStreaming) {
+        reject(new Error("Video not ready or streaming stopped"));
+        return;
       }
 
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      const context = canvas.getContext('2d');
+      try {
+        // Create canvas if it doesn't exist
+        if (!canvasRef.current) {
+          canvasRef.current = document.createElement("canvas");
+        }
 
-      // Set canvas dimensions to match video
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+        const canvas = canvasRef.current;
+        const video = videoRef.current;
+        const context = canvas.getContext("2d");
 
-      // Draw current video frame to canvas
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        // Set canvas dimensions to match video
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
 
-      // Convert to blob and create URL
-      canvas.toBlob((blob) => {
-        const imageUrl = URL.createObjectURL(blob);
-        const timestamp = new Date().toISOString();
-        
-        setCapturedImages(prev => [...prev, {
-          id: Date.now(),
-          url: imageUrl,
-          timestamp,
-          blob
-        }]);
-      }, 'image/jpeg', 0.9);
+        // Draw current video frame to canvas
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      setError(null);
-    } catch (err) {
-      setError('Failed to capture image: ' + err.message);
-    }
+        // Convert to blob and create URL
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error("Failed to capture image blob"));
+              return;
+            }
+
+            const imageUrl = URL.createObjectURL(blob);
+            const timestamp = new Date().toISOString();
+            const captured = {
+              id: Date.now(),
+              url: imageUrl,
+              timestamp,
+              blob,
+            };
+
+            setCapturedImages((prev) => [...prev, captured]);
+            setError(null);
+
+            resolve(captured); // ✅ resolve after captured
+          },
+          "image/jpeg",
+          0.9
+        );
+      } catch (err) {
+        setError("Failed to capture image: " + err.message);
+        reject(err);
+      }
+    });
   }, [isStreaming]);
 
   // Download recorded video
