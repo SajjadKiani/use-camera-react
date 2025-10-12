@@ -14,6 +14,7 @@ const useCamera = () => {
   const streamRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const canvasRef = useRef(null);
+  const recordedMimeTypeRef = useRef(null); // Store the actual MIME type used
 
   // Get available camera devices
   const getDevices = useCallback(async () => {
@@ -22,7 +23,6 @@ const useCamera = () => {
       const videoDevices = devices.filter(device => device.kind === 'videoinput');
       setDevices(videoDevices);
       
-      // Set default device if none selected
       if (!selectedDeviceId && videoDevices.length > 0) {
         setSelectedDeviceId(videoDevices[0].deviceId);
       }
@@ -43,7 +43,6 @@ const useCamera = () => {
       audio: true
     };
 
-    // Mobile-specific optimizations
     if (/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
       baseConstraints.video.width = { ideal: 720, max: 1280 };
       baseConstraints.video.height = { ideal: 480, max: 720 };
@@ -58,7 +57,6 @@ const useCamera = () => {
     try {
       setError(null);
       
-      // Stop existing stream
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -70,6 +68,10 @@ const useCamera = () => {
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        // Important for iOS: set attributes before playing
+        videoRef.current.setAttribute('playsinline', 'true');
+        videoRef.current.setAttribute('webkit-playsinline', 'true');
+        videoRef.current.muted = true;
         await videoRef.current.play();
       }
       
@@ -90,7 +92,6 @@ const useCamera = () => {
           break;
         case 'OverconstrainedError':
           errorMessage += 'Camera constraints not supported. Trying with basic settings...';
-          // Retry with basic constraints
           try {
             const basicStream = await navigator.mediaDevices.getUserMedia({
               video: true,
@@ -99,6 +100,9 @@ const useCamera = () => {
             streamRef.current = basicStream;
             if (videoRef.current) {
               videoRef.current.srcObject = basicStream;
+              videoRef.current.setAttribute('playsinline', 'true');
+              videoRef.current.setAttribute('webkit-playsinline', 'true');
+              videoRef.current.muted = true;
               await videoRef.current.play();
             }
             setIsStreaming(true);
@@ -137,26 +141,32 @@ const useCamera = () => {
     try {
       setRecordedChunks([]);
 
+      // iOS/Safari priority: MP4 formats first
       const mimeTypes = [
+        'video/mp4',
+        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
         'video/webm;codecs=vp9',
         'video/webm;codecs=vp8',
-        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"', // H.264 video, AAC audio
-        'video/mp4',
         'video/webm; codecs="vp8, opus"',
         'video/webm',
       ];
       
-      // Check for MediaRecorder support and choose appropriate codec
       let options = {};
-      const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+      const supportedMimeType = mimeTypes.find(type => {
+        const isSupported = MediaRecorder.isTypeSupported(type);
+        console.log(`Checking MIME type: ${type}, Supported: ${isSupported}`);
+        return isSupported;
+      });
 
       if (!supportedMimeType) {
+        setError("Your browser doesn't support video recording. Please try a different browser.");
         console.error("No supported MIME type found for MediaRecorder.");
-        // Handle the error: inform the user their browser is not supported.
         return;
       }
 
-      options.mimeType = supportedMimeType
+      console.log(`Using MIME type: ${supportedMimeType}`);
+      options.mimeType = supportedMimeType;
+      recordedMimeTypeRef.current = supportedMimeType; // Store for later use
 
       const mediaRecorder = new MediaRecorder(streamRef.current, options);
       mediaRecorderRef.current = mediaRecorder;
@@ -166,23 +176,38 @@ const useCamera = () => {
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
+          console.log(`Chunk received: ${event.data.size} bytes`);
         }
       };
 
       mediaRecorder.onstop = () => {
+        console.log(`Recording stopped. Total chunks: ${chunks.length}`);
         setRecordedChunks(chunks);
-        // Create video URL for preview
+        
         if (chunks.length > 0) {
-          const blob = new Blob(chunks, { type: 'video/webm' });
+          // Use the actual MIME type that was used for recording
+          const mimeType = recordedMimeTypeRef.current || 'video/mp4';
+          const blob = new Blob(chunks, { type: mimeType });
+          console.log(`Created blob: ${blob.size} bytes, type: ${blob.type}`);
+          
           const url = URL.createObjectURL(blob);
           setRecordedVideoUrl(url);
         }
       };
 
-      mediaRecorder.start(100); // Collect data every 100ms
+      mediaRecorder.onerror = (event) => {
+        console.error('MediaRecorder error:', event.error);
+        setError('Recording error: ' + event.error?.message);
+      };
+
+      // For iOS, use smaller timeslice to avoid issues
+      const timeslice = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 1000 : 100;
+      mediaRecorder.start(timeslice);
+      
       setIsRecording(true);
       setError(null);
     } catch (err) {
+      console.error('Failed to start recording:', err);
       setError('Failed to start recording: ' + err.message);
     }
   }, [isRecording]);
@@ -204,7 +229,6 @@ const useCamera = () => {
       }
 
       try {
-        // Create canvas if it doesn't exist
         if (!canvasRef.current) {
           canvasRef.current = document.createElement("canvas");
         }
@@ -213,14 +237,11 @@ const useCamera = () => {
         const video = videoRef.current;
         const context = canvas.getContext("2d");
 
-        // Set canvas dimensions to match video
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
 
-        // Draw current video frame to canvas
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-        // Convert to blob and create URL
         canvas.toBlob(
           (blob) => {
             if (!blob) {
@@ -240,7 +261,7 @@ const useCamera = () => {
             setCapturedImages((prev) => [...prev, captured]);
             setError(null);
 
-            resolve(captured); // ✅ resolve after captured
+            resolve(captured);
           },
           "image/jpeg",
           0.9
@@ -256,11 +277,16 @@ const useCamera = () => {
   const downloadVideo = useCallback(() => {
     if (recordedChunks.length === 0) return;
 
-    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const mimeType = recordedMimeTypeRef.current || 'video/mp4';
+    const blob = new Blob(recordedChunks, { type: mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `recording-${new Date().toISOString()}.webm`;
+    
+    // Use appropriate file extension based on MIME type
+    const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
+    a.download = `recording-${new Date().toISOString()}.${extension}`;
+    
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -274,6 +300,7 @@ const useCamera = () => {
       setRecordedVideoUrl(null);
     }
     setRecordedChunks([]);
+    recordedMimeTypeRef.current = null;
   }, [recordedVideoUrl]);
 
   // Download captured image
@@ -293,50 +320,42 @@ const useCamera = () => {
     }
   }, [selectedDeviceId, startCamera]);
 
-  // Toggle between cameras (front/back on mobile, or cycle through available cameras)
+  // Toggle between cameras
   const toggleCamera = useCallback(() => {
     if (devices.length <= 1) return;
 
-    // Find current device index
     const currentIndex = devices.findIndex(device => device.deviceId === selectedDeviceId);
     
-    // For mobile devices, try to intelligently toggle between front and back cameras
     if (/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
-      // Look for front/back camera patterns in device labels
       const frontCameraKeywords = ['front', 'user', 'facing user', 'selfie'];
       const backCameraKeywords = ['back', 'rear', 'environment', 'facing environment'];
       
       const currentDevice = devices[currentIndex];
       const currentLabel = currentDevice?.label?.toLowerCase() || '';
       
-      // Determine if current camera is front or back
       const isCurrentFront = frontCameraKeywords.some(keyword => currentLabel.includes(keyword));
       const isCurrentBack = backCameraKeywords.some(keyword => currentLabel.includes(keyword));
       
       let targetDevice = null;
       
       if (isCurrentFront) {
-        // Switch to back camera
         targetDevice = devices.find(device => {
           const label = device.label?.toLowerCase() || '';
           return backCameraKeywords.some(keyword => label.includes(keyword));
         });
       } else if (isCurrentBack) {
-        // Switch to front camera
         targetDevice = devices.find(device => {
           const label = device.label?.toLowerCase() || '';
           return frontCameraKeywords.some(keyword => label.includes(keyword));
         });
       }
       
-      // If we found a target device, use it; otherwise fall back to cycling
       if (targetDevice && targetDevice.deviceId !== selectedDeviceId) {
         startCamera(targetDevice.deviceId);
         return;
       }
     }
     
-    // Default behavior: cycle to next camera
     const nextIndex = (currentIndex + 1) % devices.length;
     const nextDevice = devices[nextIndex];
     
@@ -345,7 +364,7 @@ const useCamera = () => {
     }
   }, [devices, selectedDeviceId, startCamera]);
 
-  // Get camera type (front/back/unknown) for current device
+  // Get camera type
   const getCurrentCameraType = useCallback(() => {
     if (!selectedDeviceId || devices.length === 0) return 'unknown';
     
@@ -365,20 +384,16 @@ const useCamera = () => {
     return 'unknown';
   }, [selectedDeviceId, devices]);
 
-  // Initialize devices on mount
   useEffect(() => {
     getDevices();
   }, [getDevices]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopCamera();
-      // Cleanup captured image URLs
       capturedImages.forEach(image => {
         URL.revokeObjectURL(image.url);
       });
-      // Cleanup recorded video URL
       if (recordedVideoUrl) {
         URL.revokeObjectURL(recordedVideoUrl);
       }
@@ -386,10 +401,7 @@ const useCamera = () => {
   }, [stopCamera, capturedImages, recordedVideoUrl]);
 
   return {
-    // Refs
     videoRef,
-    
-    // State
     isStreaming,
     isRecording,
     error,
@@ -398,8 +410,6 @@ const useCamera = () => {
     recordedChunks,
     capturedImages,
     recordedVideoUrl,
-    
-    // Actions
     startCamera,
     stopCamera,
     startRecording,
@@ -411,8 +421,6 @@ const useCamera = () => {
     toggleCamera,
     getDevices,
     clearRecordedVideo,
-    
-    // Computed
     hasRecording: recordedChunks.length > 0,
     canRecord: isStreaming && !isRecording,
     canCapture: isStreaming,
