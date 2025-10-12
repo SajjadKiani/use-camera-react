@@ -425,7 +425,8 @@ const useCamera = () => {
     canRecord: isStreaming && !isRecording,
     canCapture: isStreaming,
     canToggleCamera: devices.length > 1,
-    currentCameraType: getCurrentCameraType()
+    currentCameraType: getCurrentCameraType(),
+    recordedMimeTypeRef
   };
 };
 
