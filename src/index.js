@@ -14,20 +14,27 @@ const useCamera = () => {
   const streamRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const canvasRef = useRef(null);
-  const recordedMimeTypeRef = useRef(null); // Store the actual MIME type used
+  const recordedMimeTypeRef = useRef(null);
 
   // Get available camera devices
   const getDevices = useCallback(async () => {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      console.log({videoDevices});
+      
       setDevices(videoDevices);
       
+      // Only set default device if we don't have one selected
       if (!selectedDeviceId && videoDevices.length > 0) {
         setSelectedDeviceId(videoDevices[0].deviceId);
       }
+      
+      return videoDevices;
     } catch (err) {
+      console.error('Failed to get camera devices:', err);
       setError('Failed to get camera devices: ' + err.message);
+      return [];
     }
   }, [selectedDeviceId]);
 
@@ -62,30 +69,40 @@ const useCamera = () => {
       }
 
       const constraints = getConstraints(deviceId);
+      console.log('Requesting camera permission with constraints:', constraints);
+
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      
+      console.log('Camera permission granted, stream obtained:', stream);
+
       streamRef.current = stream;
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        // Important for iOS: set attributes before playing
         videoRef.current.setAttribute('playsinline', 'true');
         videoRef.current.setAttribute('webkit-playsinline', 'true');
         videoRef.current.muted = true;
         await videoRef.current.play();
       }
       
-       setIsStreaming(true);
-       setSelectedDeviceId(deviceId);
-
-       // Refresh device list after permission is granted to get proper labels
-       await getDevices();
+      // FIXED: Fetch devices AFTER permission is granted
+      const videoDevices = await getDevices();
+      
+      // Set the selected device ID based on the actual stream track
+      if (stream.getVideoTracks().length > 0) {
+        const actualDeviceId = stream.getVideoTracks()[0].getSettings().deviceId;
+        if (actualDeviceId) {
+          setSelectedDeviceId(actualDeviceId);
+        }
+      }
+      
+      setIsStreaming(true);
     } catch (err) {
       let errorMessage = 'Failed to access camera: ';
       
       switch (err.name) {
         case 'NotAllowedError':
           errorMessage += 'Camera access denied. Please allow camera permissions.';
+          console.log('Camera permission denied');
           break;
         case 'NotFoundError':
           errorMessage += 'No camera found on this device.';
@@ -108,6 +125,17 @@ const useCamera = () => {
               videoRef.current.muted = true;
               await videoRef.current.play();
             }
+            
+            // FIXED: Also fetch devices after fallback succeeds
+            await getDevices();
+            
+            if (basicStream.getVideoTracks().length > 0) {
+              const actualDeviceId = basicStream.getVideoTracks()[0].getSettings().deviceId;
+              if (actualDeviceId) {
+                setSelectedDeviceId(actualDeviceId);
+              }
+            }
+            
             setIsStreaming(true);
             return;
           } catch (basicErr) {
@@ -120,7 +148,7 @@ const useCamera = () => {
       
       setError(errorMessage);
     }
-  }, [selectedDeviceId, getConstraints]);
+  }, [selectedDeviceId, getConstraints, getDevices]);
 
   // Stop camera stream
   const stopCamera = useCallback(() => {
@@ -144,7 +172,6 @@ const useCamera = () => {
     try {
       setRecordedChunks([]);
 
-      // iOS/Safari priority: MP4 formats first
       const mimeTypes = [
         'video/mp4',
         'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
@@ -169,7 +196,7 @@ const useCamera = () => {
 
       console.log(`Using MIME type: ${supportedMimeType}`);
       options.mimeType = supportedMimeType;
-      recordedMimeTypeRef.current = supportedMimeType; // Store for later use
+      recordedMimeTypeRef.current = supportedMimeType;
 
       const mediaRecorder = new MediaRecorder(streamRef.current, options);
       mediaRecorderRef.current = mediaRecorder;
@@ -188,7 +215,6 @@ const useCamera = () => {
         setRecordedChunks(chunks);
         
         if (chunks.length > 0) {
-          // Use the actual MIME type that was used for recording
           const mimeType = recordedMimeTypeRef.current || 'video/mp4';
           const blob = new Blob(chunks, { type: mimeType });
           console.log(`Created blob: ${blob.size} bytes, type: ${blob.type}`);
@@ -203,7 +229,6 @@ const useCamera = () => {
         setError('Recording error: ' + event.error?.message);
       };
 
-      // For iOS, use smaller timeslice to avoid issues
       const timeslice = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 1000 : 100;
       mediaRecorder.start(timeslice);
       
@@ -286,7 +311,6 @@ const useCamera = () => {
     const a = document.createElement('a');
     a.href = url;
     
-    // Use appropriate file extension based on MIME type
     const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
     a.download = `recording-${new Date().toISOString()}.${extension}`;
     
@@ -387,9 +411,8 @@ const useCamera = () => {
     return 'unknown';
   }, [selectedDeviceId, devices]);
 
-  useEffect(() => {
-    getDevices();
-  }, [getDevices]);
+  // REMOVED: Initial getDevices() call from useEffect
+  // This was causing the issue - it tried to fetch devices before permission
 
   useEffect(() => {
     return () => {
