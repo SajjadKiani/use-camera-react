@@ -75,8 +75,11 @@ const useCamera = () => {
         await videoRef.current.play();
       }
       
-      setIsStreaming(true);
-      setSelectedDeviceId(deviceId);
+       setIsStreaming(true);
+       setSelectedDeviceId(deviceId);
+
+       // Refresh device list after permission is granted to get proper labels
+       await getDevices();
     } catch (err) {
       let errorMessage = 'Failed to access camera: ';
       
