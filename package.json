@@ -1,6 +1,6 @@
 {
   "name": "use-camera-react",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "A React hook to control the device camera: start/stop, flip front/back, capture photos, and record short videos with audio.",
   "main": "src/index.js",
   "keywords": [

@@ -132,6 +132,7 @@ export default CameraComponent;
 | `selectedDeviceId` | `string \| null` | Currently selected camera device ID |
 | `capturedImages` | `Array` | Array of captured image objects |
 | `recordedVideoUrl` | `string \| null` | URL of recorded video |
+| `hasRecording` | `boolean` | Whether there's a recorded video available for download |
 | `canRecord` | `boolean` | Whether recording can be started |
 | `canCapture` | `boolean` | Whether photo can be captured |
 | `canToggleCamera` | `boolean` | Whether camera switching is available |
