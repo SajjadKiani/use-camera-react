@@ -330,7 +330,7 @@ const useCamera = () => {
     }
     setRecordedChunks([]);
     recordedMimeTypeRef.current = null;
-    setRecordedBlob(null);
+    // setRecordedBlob(null);
   }, [recordedVideoUrl, recordedBlob]);
 
   // Download captured image
@@ -426,7 +426,7 @@ const useCamera = () => {
       if (recordedVideoUrl) {
         URL.revokeObjectURL(recordedVideoUrl);
       }
-      setRecordedBlob(null);
+      // setRecordedBlob(null);
     };
   }, [stopCamera, capturedImages, recordedVideoUrl, recordedBlob]);
 
