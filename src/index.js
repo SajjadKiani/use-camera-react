@@ -9,6 +9,7 @@ const useCamera = () => {
   const [recordedChunks, setRecordedChunks] = useState([]);
   const [capturedImages, setCapturedImages] = useState([]);
   const [recordedVideoUrl, setRecordedVideoUrl] = useState(null);
+  const [recordedBlob, setRecordedBlob] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -221,6 +222,7 @@ const useCamera = () => {
           
           const url = URL.createObjectURL(blob);
           setRecordedVideoUrl(url);
+          setRecordedBlob(blob)
         }
       };
 
@@ -328,7 +330,8 @@ const useCamera = () => {
     }
     setRecordedChunks([]);
     recordedMimeTypeRef.current = null;
-  }, [recordedVideoUrl]);
+    setRecordedBlob(null);
+  }, [recordedVideoUrl, recordedBlob]);
 
   // Download captured image
   const downloadImage = useCallback((imageData) => {
@@ -423,8 +426,9 @@ const useCamera = () => {
       if (recordedVideoUrl) {
         URL.revokeObjectURL(recordedVideoUrl);
       }
+      setRecordedBlob(null);
     };
-  }, [stopCamera, capturedImages, recordedVideoUrl]);
+  }, [stopCamera, capturedImages, recordedVideoUrl, recordedBlob]);
 
   return {
     videoRef,
@@ -436,6 +440,7 @@ const useCamera = () => {
     recordedChunks,
     capturedImages,
     recordedVideoUrl,
+    recordedBlob,
     startCamera,
     stopCamera,
     startRecording,
