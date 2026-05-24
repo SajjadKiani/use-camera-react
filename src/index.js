@@ -16,14 +16,16 @@ const useCamera = () => {
   const mediaRecorderRef = useRef(null);
   const canvasRef = useRef(null);
   const recordedMimeTypeRef = useRef(null);
+  const isStartingRef = useRef(false);
+  const capturedImagesRef = useRef([]);
+  const recordedVideoUrlRef = useRef(null);
 
   // Get available camera devices
   const getDevices = useCallback(async () => {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(device => device.kind === 'videoinput');
-      console.log({videoDevices});
-      
+
       setDevices(videoDevices);
       
       // Only set default device if we don't have one selected
@@ -33,7 +35,6 @@ const useCamera = () => {
       
       return videoDevices;
     } catch (err) {
-      console.error('Failed to get camera devices:', err);
       setError('Failed to get camera devices: ' + err.message);
       return [];
     }
@@ -62,18 +63,18 @@ const useCamera = () => {
 
   // Start camera stream
   const startCamera = useCallback(async (deviceId = selectedDeviceId) => {
+    if (isStartingRef.current) return;
+    isStartingRef.current = true;
     try {
       setError(null);
-      
+
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
 
       const constraints = getConstraints(deviceId);
-      console.log('Requesting camera permission with constraints:', constraints);
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      console.log('Camera permission granted, stream obtained:', stream);
 
       streamRef.current = stream;
       
@@ -103,7 +104,6 @@ const useCamera = () => {
       switch (err.name) {
         case 'NotAllowedError':
           errorMessage += 'Camera access denied. Please allow camera permissions.';
-          console.log('Camera permission denied');
           break;
         case 'NotFoundError':
           errorMessage += 'No camera found on this device.';
@@ -136,7 +136,7 @@ const useCamera = () => {
                 setSelectedDeviceId(actualDeviceId);
               }
             }
-            
+
             setIsStreaming(true);
             return;
           } catch (basicErr) {
@@ -146,8 +146,10 @@ const useCamera = () => {
         default:
           errorMessage += err.message;
       }
-      
+
       setError(errorMessage);
+    } finally {
+      isStartingRef.current = false;
     }
   }, [selectedDeviceId, getConstraints, getDevices]);
 
@@ -183,19 +185,13 @@ const useCamera = () => {
       ];
       
       let options = {};
-      const supportedMimeType = mimeTypes.find(type => {
-        const isSupported = MediaRecorder.isTypeSupported(type);
-        console.log(`Checking MIME type: ${type}, Supported: ${isSupported}`);
-        return isSupported;
-      });
+      const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
 
       if (!supportedMimeType) {
         setError("Your browser doesn't support video recording. Please try a different browser.");
-        console.error("No supported MIME type found for MediaRecorder.");
         return;
       }
 
-      console.log(`Using MIME type: ${supportedMimeType}`);
       options.mimeType = supportedMimeType;
       recordedMimeTypeRef.current = supportedMimeType;
 
@@ -207,27 +203,22 @@ const useCamera = () => {
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
-          console.log(`Chunk received: ${event.data.size} bytes`);
         }
       };
 
       mediaRecorder.onstop = () => {
-        console.log(`Recording stopped. Total chunks: ${chunks.length}`);
         setRecordedChunks(chunks);
-        
+
         if (chunks.length > 0) {
           const mimeType = recordedMimeTypeRef.current || 'video/mp4';
           const blob = new Blob(chunks, { type: mimeType });
-          console.log(`Created blob: ${blob.size} bytes, type: ${blob.type}`);
-          
           const url = URL.createObjectURL(blob);
           setRecordedVideoUrl(url);
-          setRecordedBlob(blob)
+          setRecordedBlob(blob);
         }
       };
 
       mediaRecorder.onerror = (event) => {
-        console.error('MediaRecorder error:', event.error);
         setError('Recording error: ' + event.error?.message);
       };
 
@@ -237,7 +228,6 @@ const useCamera = () => {
       setIsRecording(true);
       setError(null);
     } catch (err) {
-      console.error('Failed to start recording:', err);
       setError('Failed to start recording: ' + err.message);
     }
   }, [isRecording]);
@@ -329,9 +319,9 @@ const useCamera = () => {
       setRecordedVideoUrl(null);
     }
     setRecordedChunks([]);
+    setRecordedBlob(null);
     recordedMimeTypeRef.current = null;
-    // setRecordedBlob(null);
-  }, [recordedVideoUrl, recordedBlob]);
+  }, [recordedVideoUrl]);
 
   // Download captured image
   const downloadImage = useCallback((imageData) => {
@@ -414,21 +404,30 @@ const useCamera = () => {
     return 'unknown';
   }, [selectedDeviceId, devices]);
 
-  // REMOVED: Initial getDevices() call from useEffect
-  // This was causing the issue - it tried to fetch devices before permission
+  // Mirror state into refs so the unmount cleanup can see the latest values
+  // without re-subscribing (which would tear down the camera on every capture).
+  useEffect(() => {
+    capturedImagesRef.current = capturedImages;
+  }, [capturedImages]);
+
+  useEffect(() => {
+    recordedVideoUrlRef.current = recordedVideoUrl;
+  }, [recordedVideoUrl]);
 
   useEffect(() => {
     return () => {
-      stopCamera();
-      capturedImages.forEach(image => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      capturedImagesRef.current.forEach(image => {
         URL.revokeObjectURL(image.url);
       });
-      if (recordedVideoUrl) {
-        URL.revokeObjectURL(recordedVideoUrl);
+      if (recordedVideoUrlRef.current) {
+        URL.revokeObjectURL(recordedVideoUrlRef.current);
       }
-      // setRecordedBlob(null);
     };
-  }, [stopCamera, capturedImages, recordedVideoUrl, recordedBlob]);
+  }, []);
 
   return {
     videoRef,
