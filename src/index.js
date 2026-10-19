@@ -1,6 +1,18 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
-const useCamera = () => {
+const DEFAULT_MIME_TYPES = [
+  'video/mp4',
+  'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
+  'video/webm;codecs=vp9',
+  'video/webm;codecs=vp8',
+  'video/webm; codecs="vp8, opus"',
+  'video/webm',
+];
+
+const isPositiveFinite = (value) =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+const useCamera = (options = {}) => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [error, setError] = useState(null);
@@ -10,6 +22,7 @@ const useCamera = () => {
   const [capturedImages, setCapturedImages] = useState([]);
   const [recordedVideoUrl, setRecordedVideoUrl] = useState(null);
   const [recordedBlob, setRecordedBlob] = useState(null);
+  const [recordedMimeType, setRecordedMimeType] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -19,6 +32,11 @@ const useCamera = () => {
   const isStartingRef = useRef(false);
   const capturedImagesRef = useRef([]);
   const recordedVideoUrlRef = useRef(null);
+
+  // Options are read through a ref so the callbacks below never need them in
+  // their dependency arrays; callers may pass a fresh inline object each render.
+  const optionsRef = useRef(options);
+  optionsRef.current = options || {};
 
   // Get available camera devices
   const getDevices = useCallback(async () => {
@@ -56,6 +74,11 @@ const useCamera = () => {
       baseConstraints.video.width = { ideal: 720, max: 1280 };
       baseConstraints.video.height = { ideal: 480, max: 720 };
       baseConstraints.video.frameRate = { ideal: 24, max: 30 };
+    }
+
+    const { videoConstraints } = optionsRef.current;
+    if (videoConstraints && typeof videoConstraints === 'object') {
+      baseConstraints.video = { ...baseConstraints.video, ...videoConstraints };
     }
 
     return baseConstraints;
@@ -175,16 +198,16 @@ const useCamera = () => {
     try {
       setRecordedChunks([]);
 
-      const mimeTypes = [
-        'video/mp4',
-        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
-        'video/webm;codecs=vp9',
-        'video/webm;codecs=vp8',
-        'video/webm; codecs="vp8, opus"',
-        'video/webm',
-      ];
-      
-      let options = {};
+      const {
+        mimeTypes: customMimeTypes,
+        videoBitsPerSecond,
+        audioBitsPerSecond,
+      } = optionsRef.current;
+
+      const mimeTypes = Array.isArray(customMimeTypes) && customMimeTypes.length > 0
+        ? customMimeTypes
+        : DEFAULT_MIME_TYPES;
+
       const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
 
       if (!supportedMimeType) {
@@ -192,10 +215,28 @@ const useCamera = () => {
         return;
       }
 
-      options.mimeType = supportedMimeType;
       recordedMimeTypeRef.current = supportedMimeType;
+      setRecordedMimeType(supportedMimeType);
 
-      const mediaRecorder = new MediaRecorder(streamRef.current, options);
+      const recorderOptions = { mimeType: supportedMimeType };
+      if (isPositiveFinite(videoBitsPerSecond)) {
+        recorderOptions.videoBitsPerSecond = videoBitsPerSecond;
+      }
+      if (isPositiveFinite(audioBitsPerSecond)) {
+        recorderOptions.audioBitsPerSecond = audioBitsPerSecond;
+      }
+
+      let mediaRecorder;
+      try {
+        mediaRecorder = new MediaRecorder(streamRef.current, recorderOptions);
+      } catch (constructErr) {
+        // Some browsers reject unsupported bitrate/mimeType combinations. Retry
+        // with just the mime type so a bitrate hint never breaks recording on a
+        // browser that worked without it.
+        const hasBitrateHint = 'videoBitsPerSecond' in recorderOptions || 'audioBitsPerSecond' in recorderOptions;
+        if (!hasBitrateHint) throw constructErr;
+        mediaRecorder = new MediaRecorder(streamRef.current, { mimeType: supportedMimeType });
+      }
       mediaRecorderRef.current = mediaRecorder;
 
       const chunks = [];
@@ -320,6 +361,7 @@ const useCamera = () => {
     }
     setRecordedChunks([]);
     setRecordedBlob(null);
+    setRecordedMimeType(null);
     recordedMimeTypeRef.current = null;
   }, [recordedVideoUrl]);
 
@@ -440,6 +482,7 @@ const useCamera = () => {
     capturedImages,
     recordedVideoUrl,
     recordedBlob,
+    recordedMimeType,
     startCamera,
     stopCamera,
     startRecording,

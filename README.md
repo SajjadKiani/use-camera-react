@@ -118,6 +118,49 @@ function CameraComponent() {
 export default CameraComponent;
 ```
 
+## Options
+
+`useCamera()` works with no arguments. Pass an options object to control the stream constraints and how `MediaRecorder` encodes the clip:
+
+```jsx
+const cam = useCamera({
+  videoBitsPerSecond: 2_500_000,      // target video bitrate (bps)
+  audioBitsPerSecond: 64_000,         // target audio bitrate (bps)
+  mimeTypes: ['video/webm;codecs=vp9', 'video/mp4'], // first supported wins
+  videoConstraints: { facingMode: 'user' },          // merged over the defaults
+});
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `videoBitsPerSecond` | `number` | Passed to `MediaRecorder` as `videoBitsPerSecond`. Only used when it is a finite positive number. |
+| `audioBitsPerSecond` | `number` | Passed to `MediaRecorder` as `audioBitsPerSecond`. Only used when it is a finite positive number. |
+| `mimeTypes` | `string[]` | Replaces the default candidate list (`video/mp4` → `video/webm` variants). Each entry is checked with `MediaRecorder.isTypeSupported`; the first supported one is used. |
+| `videoConstraints` | `MediaTrackConstraints` | Shallow-merged over the hook's default `video` constraints (after the mobile overrides) before `getUserMedia` is called. |
+
+Options are read at call time (when `startCamera` / `startRecording` run), so passing an inline object literal on every render is fine and does not restart the camera.
+
+If a browser rejects the bitrate options in the `MediaRecorder` constructor, the hook retries once with only the mime type, so a bitrate hint never breaks recording on a browser that worked without it. Bitrates are hints: the browser's encoder may not honor them exactly.
+
+### Keep uploads small
+
+To keep a 15-second clip well under 10 MB, cap the bitrate and resolution:
+
+```jsx
+const { startRecording, recordedBlob, recordedMimeType } = useCamera({
+  videoBitsPerSecond: 2_000_000, // ~2 Mbps → ~3.75 MB for 15 s of video
+  audioBitsPerSecond: 64_000,
+  videoConstraints: { width: { ideal: 640 }, height: { ideal: 480 } },
+});
+
+// After stopRecording():
+const file = new File(
+  [recordedBlob],
+  `selfie.${recordedMimeType?.includes('mp4') ? 'mp4' : 'webm'}`,
+  { type: recordedMimeType }
+);
+```
+
 ## API Reference
 
 ### Return Values
@@ -132,6 +175,9 @@ export default CameraComponent;
 | `selectedDeviceId` | `string \| null` | Currently selected camera device ID |
 | `capturedImages` | `Array` | Array of captured image objects |
 | `recordedVideoUrl` | `string \| null` | URL of recorded video |
+| `recordedBlob` | `Blob \| null` | Blob of the recorded video |
+| `recordedMimeType` | `string \| null` | Resolved mime type used for the current recording (set when recording starts, cleared by `clearRecordedVideo`) |
+| `recordedMimeTypeRef` | `MutableRefObject<string \| null>` | Ref holding the same value, for use in callbacks without re-rendering |
 | `hasRecording` | `boolean` | Whether there's a recorded video available for download |
 | `canRecord` | `boolean` | Whether recording can be started |
 | `canCapture` | `boolean` | Whether photo can be captured |
