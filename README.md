@@ -124,6 +124,8 @@ export default CameraComponent;
 
 ```jsx
 const cam = useCamera({
+  facingMode: 'environment',          // open the back camera ('user' = front)
+  audio: false,                       // no microphone prompt (photo / scanning)
   videoBitsPerSecond: 2_500_000,      // target video bitrate (bps)
   audioBitsPerSecond: 64_000,         // target audio bitrate (bps)
   mimeTypes: ['video/webm;codecs=vp9', 'video/mp4'], // first supported wins
@@ -133,6 +135,8 @@ const cam = useCamera({
 
 | Option | Type | Description |
 |--------|------|-------------|
+| `facingMode` | `'user' \| 'environment'` | Camera to open: front (`user`) or back (`environment`). Requested as `facingMode: { ideal }`, so a device without that camera still streams. `toggleCamera` flips it. Default: browser's choice. |
+| `audio` | `boolean` | Request the microphone with the camera. Default `true` (recording with sound). Pass `false` for photo capture or scanning so the browser never prompts for the microphone. |
 | `videoBitsPerSecond` | `number` | Passed to `MediaRecorder` as `videoBitsPerSecond`. Only used when it is a finite positive number. |
 | `audioBitsPerSecond` | `number` | Passed to `MediaRecorder` as `audioBitsPerSecond`. Only used when it is a finite positive number. |
 | `mimeTypes` | `string[]` | Replaces the default candidate list (`video/mp4` → `video/webm` variants). Each entry is checked with `MediaRecorder.isTypeSupported`; the first supported one is used. |
@@ -188,15 +192,15 @@ const file = new File(
 
 | Method | Parameters | Description |
 |--------|------------|-------------|
-| `startCamera` | `deviceId?: string` | Start camera with optional device ID |
+| `startCamera` | `deviceId?: string` | Start camera with optional device ID. Resolves `true` once the stream is playing, `false` on failure (see `error`) or when a later `startCamera` / `stopCamera` superseded it |
 | `stopCamera` | - | Stop camera stream |
 | `startRecording` | - | Start video recording |
 | `stopRecording` | - | Stop video recording |
 | `captureImage` | - | Capture photo from current stream |
 | `downloadVideo` | - | Download recorded video |
 | `downloadImage` | `imageData` | Download specific captured image |
-| `toggleCamera` | - | Switch between available cameras |
-| `switchCamera` | `deviceId: string` | Switch to specific camera device |
+| `toggleCamera` | - | Switch front ↔ back. When the current camera's facing is known the opposite facing is requested from the browser (which picks that side's main lens); otherwise cycles the enumerated devices. Resolves like `startCamera` |
+| `switchCamera` | `deviceId: string` | Switch to specific camera device. Resolves like `startCamera` |
 | `getDevices` | - | Refresh list of available devices |
 | `clearRecordedVideo` | - | Clear recorded video data |
 
@@ -219,6 +223,13 @@ This hook uses the MediaDevices API which is supported in all modern browsers:
 - ✅ Firefox 36+
 - ✅ Safari 11+
 - ✅ Edge 12+
+
+## Lifecycle guarantees
+
+- `stopCamera()` (or unmounting) while `startCamera()` is still waiting on `getUserMedia` stops that stream the moment it arrives, so a dialog closed quickly never leaves the camera light on.
+- Calling `startCamera()` again before the previous call finished supersedes it; only the latest request becomes the live stream.
+- `stopCamera()` also stops an in-progress `MediaRecorder`, and each new recording revokes the previous clip's object URL.
+- `currentCameraType` is read from the track's `facingMode` setting when the browser reports it, and only falls back to matching device labels when it doesn't.
 
 ## Mobile Considerations
 

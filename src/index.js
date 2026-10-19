@@ -9,8 +9,39 @@ const DEFAULT_MIME_TYPES = [
   'video/webm',
 ];
 
+const FRONT_LABEL_KEYWORDS = ['front', 'user', 'facing user', 'selfie'];
+const BACK_LABEL_KEYWORDS = ['back', 'rear', 'environment', 'facing environment'];
+
 const isPositiveFinite = (value) =>
   typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+const isMobileUA = () =>
+  typeof navigator !== 'undefined' &&
+  /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+// 'user' | 'environment' | null from any facingMode-ish value (string or
+// constraint object), so both the option and a track's settings can feed it.
+const normalizeFacing = (value) => {
+  const raw = value && typeof value === 'object' ? (value.exact ?? value.ideal) : value;
+  if (raw === 'user' || raw === 'environment') return raw;
+  return null;
+};
+
+const facingToType = (facing) =>
+  facing === 'user' ? 'front' : facing === 'environment' ? 'back' : 'unknown';
+
+const labelToType = (label) => {
+  const lower = (label || '').toLowerCase();
+  if (!lower) return 'unknown';
+  if (FRONT_LABEL_KEYWORDS.some((k) => lower.includes(k))) return 'front';
+  if (BACK_LABEL_KEYWORDS.some((k) => lower.includes(k))) return 'back';
+  return 'unknown';
+};
+
+const stopStream = (stream) => {
+  if (!stream) return;
+  stream.getTracks().forEach((track) => track.stop());
+};
 
 const useCamera = (options = {}) => {
   const [isStreaming, setIsStreaming] = useState(false);
@@ -18,6 +49,9 @@ const useCamera = (options = {}) => {
   const [error, setError] = useState(null);
   const [devices, setDevices] = useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
+  // Facing of the live stream, taken from the track's settings when the
+  // browser reports it (Chrome Android, iOS Safari); null when it doesn't.
+  const [streamFacing, setStreamFacing] = useState(null);
   const [recordedChunks, setRecordedChunks] = useState([]);
   const [capturedImages, setCapturedImages] = useState([]);
   const [recordedVideoUrl, setRecordedVideoUrl] = useState(null);
@@ -29,9 +63,15 @@ const useCamera = (options = {}) => {
   const mediaRecorderRef = useRef(null);
   const canvasRef = useRef(null);
   const recordedMimeTypeRef = useRef(null);
-  const isStartingRef = useRef(false);
   const capturedImagesRef = useRef([]);
   const recordedVideoUrlRef = useRef(null);
+  const mountedRef = useRef(true);
+  // Facing we asked for most recently (option, or flipped by toggleCamera).
+  const requestedFacingRef = useRef(normalizeFacing(options?.facingMode));
+  // Every startCamera call gets a new id; stopCamera and unmount bump it too.
+  // A stream that arrives for an old id is stopped on arrival, so closing a
+  // dialog while getUserMedia is still pending never leaves the camera on.
+  const startIdRef = useRef(0);
 
   // Options are read through a ref so the callbacks below never need them in
   // their dependency arrays; callers may pass a fresh inline object each render.
@@ -41,90 +81,98 @@ const useCamera = (options = {}) => {
   // Get available camera devices
   const getDevices = useCallback(async () => {
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoDevices = devices.filter(device => device.kind === 'videoinput');
-
-      setDevices(videoDevices);
-      
-      // Only set default device if we don't have one selected
-      if (!selectedDeviceId && videoDevices.length > 0) {
-        setSelectedDeviceId(videoDevices[0].deviceId);
-      }
-      
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = all.filter((device) => device.kind === 'videoinput');
+      if (mountedRef.current) setDevices(videoDevices);
       return videoDevices;
     } catch (err) {
-      setError('Failed to get camera devices: ' + err.message);
+      if (mountedRef.current) setError('Failed to get camera devices: ' + err.message);
       return [];
     }
-  }, [selectedDeviceId]);
-
-  // Get optimal constraints for different devices
-  const getConstraints = useCallback((deviceId) => {
-    const baseConstraints = {
-      video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        width: { ideal: 1280, max: 1920 },
-        height: { ideal: 720, max: 1080 },
-        frameRate: { ideal: 30, max: 60 }
-      },
-      audio: true
-    };
-
-    if (/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
-      baseConstraints.video.width = { ideal: 720, max: 1280 };
-      baseConstraints.video.height = { ideal: 480, max: 720 };
-      baseConstraints.video.frameRate = { ideal: 24, max: 30 };
-    }
-
-    const { videoConstraints } = optionsRef.current;
-    if (videoConstraints && typeof videoConstraints === 'object') {
-      baseConstraints.video = { ...baseConstraints.video, ...videoConstraints };
-    }
-
-    return baseConstraints;
   }, []);
 
-  // Start camera stream
-  const startCamera = useCallback(async (deviceId = selectedDeviceId) => {
-    if (isStartingRef.current) return;
-    isStartingRef.current = true;
+  // Build getUserMedia constraints. A deviceId wins over facingMode; facingMode
+  // is `ideal` so a laptop with a single front webcam still gets a stream.
+  const getConstraints = useCallback((deviceId, facing) => {
+    const video = {
+      width: { ideal: 1280, max: 1920 },
+      height: { ideal: 720, max: 1080 },
+      frameRate: { ideal: 30, max: 60 },
+    };
+
+    if (isMobileUA()) {
+      video.width = { ideal: 720, max: 1280 };
+      video.height = { ideal: 480, max: 720 };
+      video.frameRate = { ideal: 24, max: 30 };
+    }
+
+    if (deviceId) {
+      video.deviceId = { exact: deviceId };
+    } else if (facing) {
+      video.facingMode = { ideal: facing };
+    }
+
+    const { videoConstraints, audio } = optionsRef.current;
+    const mergedVideo =
+      videoConstraints && typeof videoConstraints === 'object'
+        ? { ...video, ...videoConstraints }
+        : video;
+
+    return { video: mergedVideo, audio: audio !== false };
+  }, []);
+
+  // Minimal constraints for the OverconstrainedError retry: drop the
+  // resolution / frame-rate hints but keep the camera that was asked for.
+  const getBasicConstraints = useCallback((deviceId, facing) => {
+    const { audio } = optionsRef.current;
+    let video = true;
+    if (deviceId) video = { deviceId: { exact: deviceId } };
+    else if (facing) video = { facingMode: { ideal: facing } };
+    return { video, audio: audio !== false };
+  }, []);
+
+  const attachStream = useCallback(async (stream) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.srcObject = stream;
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.muted = true;
     try {
-      setError(null);
-
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-
-      const constraints = getConstraints(deviceId);
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-
-      streamRef.current = stream;
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.setAttribute('playsinline', 'true');
-        videoRef.current.setAttribute('webkit-playsinline', 'true');
-        videoRef.current.muted = true;
-        await videoRef.current.play();
-      }
-      
-      // FIXED: Fetch devices AFTER permission is granted
-      const videoDevices = await getDevices();
-      
-      // Set the selected device ID based on the actual stream track
-      if (stream.getVideoTracks().length > 0) {
-        const actualDeviceId = stream.getVideoTracks()[0].getSettings().deviceId;
-        if (actualDeviceId) {
-          setSelectedDeviceId(actualDeviceId);
-        }
-      }
-      
-      setIsStreaming(true);
+      await video.play();
     } catch (err) {
+      // play() is aborted when the source changes underneath it (a quick
+      // toggle, or start-then-switch). The new source plays on its own, so
+      // this is not a camera failure.
+      if (err?.name !== 'AbortError') throw err;
+    }
+  }, []);
+
+  // Start camera stream. Resolves `true` when the stream is live, `false` when
+  // it failed (see `error`) or was superseded / cancelled meanwhile.
+  const startCamera = useCallback(async (deviceId = selectedDeviceId) => {
+    const startId = ++startIdRef.current;
+    const isCurrent = () => mountedRef.current && startIdRef.current === startId;
+    const facing = requestedFacingRef.current;
+
+    if (mountedRef.current) setError(null);
+
+    const acquire = async () => {
+      try {
+        return await navigator.mediaDevices.getUserMedia(getConstraints(deviceId, facing));
+      } catch (err) {
+        if (err?.name !== 'OverconstrainedError') throw err;
+        return navigator.mediaDevices.getUserMedia(getBasicConstraints(deviceId, facing));
+      }
+    };
+
+    let stream;
+    try {
+      stream = await acquire();
+    } catch (err) {
+      if (!isCurrent()) return false;
       let errorMessage = 'Failed to access camera: ';
-      
-      switch (err.name) {
+      switch (err?.name) {
         case 'NotAllowedError':
           errorMessage += 'Camera access denied. Please allow camera permissions.';
           break;
@@ -135,60 +183,83 @@ const useCamera = (options = {}) => {
           errorMessage += 'Camera is already in use by another application.';
           break;
         case 'OverconstrainedError':
-          errorMessage += 'Camera constraints not supported. Trying with basic settings...';
-          try {
-            const basicStream = await navigator.mediaDevices.getUserMedia({
-              video: true,
-              audio: true
-            });
-            streamRef.current = basicStream;
-            if (videoRef.current) {
-              videoRef.current.srcObject = basicStream;
-              videoRef.current.setAttribute('playsinline', 'true');
-              videoRef.current.setAttribute('webkit-playsinline', 'true');
-              videoRef.current.muted = true;
-              await videoRef.current.play();
-            }
-            
-            // FIXED: Also fetch devices after fallback succeeds
-            await getDevices();
-            
-            if (basicStream.getVideoTracks().length > 0) {
-              const actualDeviceId = basicStream.getVideoTracks()[0].getSettings().deviceId;
-              if (actualDeviceId) {
-                setSelectedDeviceId(actualDeviceId);
-              }
-            }
-
-            setIsStreaming(true);
-            return;
-          } catch (basicErr) {
-            errorMessage += ' Basic settings also failed.';
-          }
+          errorMessage += 'Camera constraints not supported.';
           break;
         default:
-          errorMessage += err.message;
+          errorMessage += err?.message || String(err);
       }
-
       setError(errorMessage);
-    } finally {
-      isStartingRef.current = false;
+      return false;
     }
-  }, [selectedDeviceId, getConstraints, getDevices]);
 
-  // Stop camera stream
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
+    // Cancelled (stopCamera / unmount) or superseded while we were waiting.
+    if (!isCurrent()) {
+      stopStream(stream);
+      return false;
     }
-    
+
+    stopStream(streamRef.current);
+    streamRef.current = stream;
+
+    try {
+      await attachStream(stream);
+    } catch (err) {
+      if (isCurrent()) {
+        stopStream(stream);
+        streamRef.current = null;
+        setError('Failed to play camera stream: ' + (err?.message || String(err)));
+      }
+      return false;
+    }
+
+    if (!isCurrent()) {
+      // stopCamera ran during play(); it already stopped and detached this stream.
+      return false;
+    }
+
+    const track = stream.getVideoTracks()[0];
+    const settings = track?.getSettings?.() || {};
+    const actualFacing = normalizeFacing(settings.facingMode);
+    if (actualFacing) requestedFacingRef.current = actualFacing;
+    setStreamFacing(actualFacing);
+    if (settings.deviceId) setSelectedDeviceId(settings.deviceId);
+
+    // Labels are only populated once permission has been granted.
+    const videoDevices = await getDevices();
+    if (!isCurrent()) return false;
+    if (!settings.deviceId && videoDevices.length > 0) {
+      setSelectedDeviceId(videoDevices[0].deviceId);
+    }
+
+    setIsStreaming(true);
+    return true;
+  }, [selectedDeviceId, getConstraints, getBasicConstraints, attachStream, getDevices]);
+
+  // Stop camera stream (and any recording still running on it)
+  const stopCamera = useCallback(() => {
+    startIdRef.current += 1;
+
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      try {
+        recorder.stop();
+      } catch (_) {
+        // already stopped
+      }
+    }
+
+    stopStream(streamRef.current);
+    streamRef.current = null;
+
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-    
-    setIsStreaming(false);
-    setIsRecording(false);
+
+    if (mountedRef.current) {
+      setIsStreaming(false);
+      setIsRecording(false);
+      setStreamFacing(null);
+    }
   }, []);
 
   // Start video recording
@@ -208,7 +279,7 @@ const useCamera = (options = {}) => {
         ? customMimeTypes
         : DEFAULT_MIME_TYPES;
 
-      const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+      const supportedMimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
 
       if (!supportedMimeType) {
         setError("Your browser doesn't support video recording. Please try a different browser.");
@@ -240,7 +311,7 @@ const useCamera = (options = {}) => {
       mediaRecorderRef.current = mediaRecorder;
 
       const chunks = [];
-      
+
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
@@ -248,24 +319,30 @@ const useCamera = (options = {}) => {
       };
 
       mediaRecorder.onstop = () => {
+        if (mediaRecorderRef.current === mediaRecorder) mediaRecorderRef.current = null;
+        if (!mountedRef.current) return;
         setRecordedChunks(chunks);
+        setIsRecording(false);
 
         if (chunks.length > 0) {
           const mimeType = recordedMimeTypeRef.current || 'video/mp4';
           const blob = new Blob(chunks, { type: mimeType });
+          // Release the previous clip's object URL before replacing it.
+          if (recordedVideoUrlRef.current) URL.revokeObjectURL(recordedVideoUrlRef.current);
           const url = URL.createObjectURL(blob);
+          recordedVideoUrlRef.current = url;
           setRecordedVideoUrl(url);
           setRecordedBlob(blob);
         }
       };
 
       mediaRecorder.onerror = (event) => {
-        setError('Recording error: ' + event.error?.message);
+        if (mountedRef.current) setError('Recording error: ' + event.error?.message);
       };
 
       const timeslice = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 1000 : 100;
       mediaRecorder.start(timeslice);
-      
+
       setIsRecording(true);
       setError(null);
     } catch (err) {
@@ -275,28 +352,29 @@ const useCamera = (options = {}) => {
 
   // Stop video recording
   const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop();
     }
-  }, [isRecording]);
+    setIsRecording(false);
+  }, []);
 
   // Capture image from video stream
   const captureImage = useCallback(() => {
     return new Promise((resolve, reject) => {
       if (!videoRef.current || !isStreaming) {
-        reject(new Error("Video not ready or streaming stopped"));
+        reject(new Error('Video not ready or streaming stopped'));
         return;
       }
 
       try {
         if (!canvasRef.current) {
-          canvasRef.current = document.createElement("canvas");
+          canvasRef.current = document.createElement('canvas');
         }
 
         const canvas = canvasRef.current;
         const video = videoRef.current;
-        const context = canvas.getContext("2d");
+        const context = canvas.getContext('2d');
 
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -306,7 +384,7 @@ const useCamera = (options = {}) => {
         canvas.toBlob(
           (blob) => {
             if (!blob) {
-              reject(new Error("Failed to capture image blob"));
+              reject(new Error('Failed to capture image blob'));
               return;
             }
 
@@ -324,11 +402,11 @@ const useCamera = (options = {}) => {
 
             resolve(captured);
           },
-          "image/jpeg",
+          'image/jpeg',
           0.9
         );
       } catch (err) {
-        setError("Failed to capture image: " + err.message);
+        setError('Failed to capture image: ' + err.message);
         reject(err);
       }
     });
@@ -343,10 +421,10 @@ const useCamera = (options = {}) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    
+
     const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
     a.download = `recording-${new Date().toISOString()}.${extension}`;
-    
+
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -355,15 +433,16 @@ const useCamera = (options = {}) => {
 
   // Clear recorded video
   const clearRecordedVideo = useCallback(() => {
-    if (recordedVideoUrl) {
-      URL.revokeObjectURL(recordedVideoUrl);
-      setRecordedVideoUrl(null);
+    if (recordedVideoUrlRef.current) {
+      URL.revokeObjectURL(recordedVideoUrlRef.current);
+      recordedVideoUrlRef.current = null;
     }
+    setRecordedVideoUrl(null);
     setRecordedChunks([]);
     setRecordedBlob(null);
     setRecordedMimeType(null);
     recordedMimeTypeRef.current = null;
-  }, [recordedVideoUrl]);
+  }, []);
 
   // Download captured image
   const downloadImage = useCallback((imageData) => {
@@ -378,73 +457,48 @@ const useCamera = (options = {}) => {
   // Switch camera device
   const switchCamera = useCallback((deviceId) => {
     if (deviceId !== selectedDeviceId) {
-      startCamera(deviceId);
+      return startCamera(deviceId);
     }
+    return Promise.resolve(false);
   }, [selectedDeviceId, startCamera]);
 
-  // Toggle between cameras
-  const toggleCamera = useCallback(() => {
-    if (devices.length <= 1) return;
-
-    const currentIndex = devices.findIndex(device => device.deviceId === selectedDeviceId);
-    
-    if (/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
-      const frontCameraKeywords = ['front', 'user', 'facing user', 'selfie'];
-      const backCameraKeywords = ['back', 'rear', 'environment', 'facing environment'];
-      
-      const currentDevice = devices[currentIndex];
-      const currentLabel = currentDevice?.label?.toLowerCase() || '';
-      
-      const isCurrentFront = frontCameraKeywords.some(keyword => currentLabel.includes(keyword));
-      const isCurrentBack = backCameraKeywords.some(keyword => currentLabel.includes(keyword));
-      
-      let targetDevice = null;
-      
-      if (isCurrentFront) {
-        targetDevice = devices.find(device => {
-          const label = device.label?.toLowerCase() || '';
-          return backCameraKeywords.some(keyword => label.includes(keyword));
-        });
-      } else if (isCurrentBack) {
-        targetDevice = devices.find(device => {
-          const label = device.label?.toLowerCase() || '';
-          return frontCameraKeywords.some(keyword => label.includes(keyword));
-        });
-      }
-      
-      if (targetDevice && targetDevice.deviceId !== selectedDeviceId) {
-        startCamera(targetDevice.deviceId);
-        return;
-      }
-    }
-    
-    const nextIndex = (currentIndex + 1) % devices.length;
-    const nextDevice = devices[nextIndex];
-    
-    if (nextDevice && nextDevice.deviceId !== selectedDeviceId) {
-      startCamera(nextDevice.deviceId);
-    }
-  }, [devices, selectedDeviceId, startCamera]);
-
-  // Get camera type
-  const getCurrentCameraType = useCallback(() => {
+  const currentCameraType = (() => {
+    if (streamFacing) return facingToType(streamFacing);
     if (!selectedDeviceId || devices.length === 0) return 'unknown';
-    
-    const currentDevice = devices.find(device => device.deviceId === selectedDeviceId);
-    if (!currentDevice?.label) return 'unknown';
-    
-    const label = currentDevice.label.toLowerCase();
-    const frontKeywords = ['front', 'user', 'facing user', 'selfie'];
-    const backKeywords = ['back', 'rear', 'environment', 'facing environment'];
-    
-    if (frontKeywords.some(keyword => label.includes(keyword))) {
-      return 'front';
-    } else if (backKeywords.some(keyword => label.includes(keyword))) {
-      return 'back';
+    const current = devices.find((device) => device.deviceId === selectedDeviceId);
+    return labelToType(current?.label);
+  })();
+
+  // Toggle between cameras. When the current facing is known, ask the browser
+  // for the opposite one (it picks the main camera of that side, so phones
+  // with several back lenses don't land on the ultra-wide). Otherwise fall
+  // back to cycling through the enumerated devices.
+  const toggleCamera = useCallback(() => {
+    if (currentCameraType === 'front' || currentCameraType === 'back') {
+      requestedFacingRef.current = currentCameraType === 'front' ? 'environment' : 'user';
+      // null, not undefined: undefined would fall back to the default
+      // parameter (the current deviceId) and reopen the same camera.
+      return startCamera(null);
     }
-    
-    return 'unknown';
-  }, [selectedDeviceId, devices]);
+
+    if (devices.length <= 1) return Promise.resolve(false);
+    const currentIndex = devices.findIndex((device) => device.deviceId === selectedDeviceId);
+    const nextDevice = devices[(currentIndex + 1) % devices.length];
+    if (nextDevice && nextDevice.deviceId !== selectedDeviceId) {
+      return startCamera(nextDevice.deviceId);
+    }
+    return Promise.resolve(false);
+  }, [currentCameraType, devices, selectedDeviceId, startCamera]);
+
+  // If the <video> mounts after the stream arrived (e.g. it's rendered only
+  // once `isStreaming` is true), attach the stream then.
+  useEffect(() => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (isStreaming && video && stream && video.srcObject !== stream) {
+      attachStream(stream).catch(() => {});
+    }
+  });
 
   // Mirror state into refs so the unmount cleanup can see the latest values
   // without re-subscribing (which would tear down the camera on every capture).
@@ -453,20 +507,26 @@ const useCamera = (options = {}) => {
   }, [capturedImages]);
 
   useEffect(() => {
-    recordedVideoUrlRef.current = recordedVideoUrl;
-  }, [recordedVideoUrl]);
-
-  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
+      mountedRef.current = false;
+      startIdRef.current += 1;
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== 'inactive') {
+        try {
+          recorder.stop();
+        } catch (_) {
+          // already stopped
+        }
       }
-      capturedImagesRef.current.forEach(image => {
+      stopStream(streamRef.current);
+      streamRef.current = null;
+      capturedImagesRef.current.forEach((image) => {
         URL.revokeObjectURL(image.url);
       });
       if (recordedVideoUrlRef.current) {
         URL.revokeObjectURL(recordedVideoUrlRef.current);
+        recordedVideoUrlRef.current = null;
       }
     };
   }, []);
@@ -498,8 +558,8 @@ const useCamera = (options = {}) => {
     canRecord: isStreaming && !isRecording,
     canCapture: isStreaming,
     canToggleCamera: devices.length > 1,
-    currentCameraType: getCurrentCameraType(),
-    recordedMimeTypeRef
+    currentCameraType,
+    recordedMimeTypeRef,
   };
 };
 
